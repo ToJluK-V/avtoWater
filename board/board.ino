@@ -26,8 +26,7 @@
 // =====================================================
 
 const uint32_t WIFI_TIMEOUT_MS = 15000;
-// Бесплатный Render просыпается около минуты.
-const uint32_t HTTP_TIMEOUT_MS = 70000;
+const uint32_t HTTP_TIMEOUT_MS = 15000;
 
 const int32_t MAX_PUMP_MS = 30000;
 const int32_t MAX_SLEEP_MIN = 180;   // предел deepSleep ESP8266 около 3,5 ч

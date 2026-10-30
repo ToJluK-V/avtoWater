@@ -18,6 +18,8 @@ var adminKey = builder.Configuration["ADMIN_KEY"];
 builder.Services.AddSingleton<StateStore>();
 builder.Services.AddHttpClient<TelegramService>();
 builder.Services.AddHttpClient<Notifier>();
+builder.Services.AddHttpClient<KeepAlive>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<KeepAlive>());
 
 var app = builder.Build();
 
