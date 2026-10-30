@@ -16,3 +16,9 @@ Thumbs.db
 
 # Git
 .git/
+secrets.h
+
+server/bin/
+server/obj/
+server/data/
+*.bin
