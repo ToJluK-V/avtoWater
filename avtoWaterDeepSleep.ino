@@ -5,7 +5,9 @@
 #include <DallasTemperature.h>
 #include <UniversalTelegramBot.h>
 #include <ThingSpeak.h>
+#include <ESP8266HTTPClient.h>
 #include <EEPROM.h>
+#include <stdlib.h>
 #include <time.h>
 
 // =====================================================
@@ -43,6 +45,7 @@ const uint64_t SLEEP_US = 30ULL * 60ULL * 1000000ULL;
 
 const uint32_t THINGSPEAK_INTERVAL = 30UL * 60UL;
 const uint32_t MIN_WATERING_INTERVAL = 6UL * 60UL * 60UL;
+const uint8_t CHART_RESULTS = 48;
 
 const uint32_t WIFI_TIMEOUT_MS = 15000;
 const uint32_t NTP_TIMEOUT_MS = 8000;
@@ -343,6 +346,205 @@ void updateTelegram() {
 // THINGSPEAK
 // =====================================================
 
+bool readThingSpeakHistory(
+  float temperatures[],
+  int soilValues[],
+  uint8_t& count
+) {
+  HTTPClient http;
+  String url = "http://api.thingspeak.com/channels/";
+  url += String(tsChannelNumber);
+  url += "/feeds.csv?results=";
+  url += String(CHART_RESULTS);
+
+  if (!http.begin(tsClient, url)) {
+    Serial.println("Не удалось открыть ThingSpeak для чтения графика.");
+    return false;
+  }
+
+  int httpCode = http.GET();
+
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.print("Ошибка чтения истории ThingSpeak: ");
+    Serial.println(httpCode);
+    http.end();
+    return false;
+  }
+
+  String csv = http.getString();
+  http.end();
+
+  count = 0;
+  int rowStart = 0;
+
+  while (rowStart < csv.length() && count < CHART_RESULTS) {
+    int rowEnd = csv.indexOf('\n', rowStart);
+
+    if (rowEnd < 0) {
+      rowEnd = csv.length();
+    }
+
+    String row = csv.substring(rowStart, rowEnd);
+    row.trim();
+    rowStart = rowEnd + 1;
+
+    int firstComma = row.indexOf(',');
+    int secondComma = row.indexOf(',', firstComma + 1);
+    int thirdComma = row.indexOf(',', secondComma + 1);
+
+    if (firstComma < 0 || secondComma < 0 || thirdComma < 0) {
+      continue;
+    }
+
+    int fourthComma = row.indexOf(',', thirdComma + 1);
+    String temperatureText = row.substring(secondComma + 1, thirdComma);
+    String soilText = fourthComma < 0
+      ? row.substring(thirdComma + 1)
+      : row.substring(thirdComma + 1, fourthComma);
+
+    temperatureText.trim();
+    soilText.trim();
+
+    if (temperatureText == "field1" || soilText == "field2" ||
+        temperatureText.length() == 0 || soilText.length() == 0) {
+      continue;
+    }
+
+    const char* temperatureStart = temperatureText.c_str();
+    char* temperatureEnd;
+    float rowTemperature = strtof(temperatureStart, &temperatureEnd);
+
+    const char* soilStart = soilText.c_str();
+    char* soilEnd;
+    long parsedSoilValue = strtol(soilStart, &soilEnd, 10);
+
+    if (temperatureEnd == temperatureStart || *temperatureEnd != '\0' ||
+        soilEnd == soilStart || *soilEnd != '\0' ||
+        !(rowTemperature >= -55.0 && rowTemperature <= 125.0) ||
+        parsedSoilValue < 0 || parsedSoilValue > 1023) {
+      continue;
+    }
+
+    temperatures[count] = rowTemperature;
+    soilValues[count] = static_cast<int>(parsedSoilValue);
+    count++;
+  }
+
+  if (count < 2) {
+    Serial.println("Недостаточно данных ThingSpeak для построения графиков.");
+    return false;
+  }
+
+  return true;
+}
+
+String encodeUrlParameter(const String& value) {
+  const char hex[] = "0123456789ABCDEF";
+  String encoded;
+  encoded.reserve(value.length() * 3);
+
+  for (size_t i = 0; i < value.length(); i++) {
+    uint8_t c = static_cast<uint8_t>(value[i]);
+
+    if ((c >= 'a' && c <= 'z') ||
+        (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') ||
+        c == '-' || c == '_' || c == '.' || c == '~') {
+      encoded += static_cast<char>(c);
+    } else {
+      encoded += '%';
+      encoded += hex[c >> 4];
+      encoded += hex[c & 0x0F];
+    }
+  }
+
+  return encoded;
+}
+
+String buildQuickChartUrl(
+  const float temperatures[],
+  const int soilValues[],
+  uint8_t count,
+  bool temperatureChart
+) {
+  String config;
+  config.reserve(1200);
+  config = "{\"type\":\"line\",\"data\":{\"labels\":[";
+
+  for (uint8_t i = 0; i < count; i++) {
+    if (i > 0) {
+      config += ',';
+    }
+    config += String(i + 1);
+  }
+
+  config += "],\"datasets\":[{\"label\":\"";
+  config += temperatureChart ? "Temperature (C)" : "Soil moisture (ADC)";
+  config += "\",\"data\":[";
+
+  for (uint8_t i = 0; i < count; i++) {
+    if (i > 0) {
+      config += ',';
+    }
+    config += temperatureChart
+      ? String(temperatures[i], 1)
+      : String(soilValues[i]);
+  }
+
+  config += temperatureChart
+    ? "],\"borderColor\":\"#e74c3c\",\"fill\":false,\"pointRadius\":2}]},"
+      "\"options\":{\"plugins\":{\"legend\":{\"display\":false},"
+      "\"title\":{\"display\":true,\"text\":\"Temperature (C)\"}},"
+      "\"scales\":{\"y\":{\"beginAtZero\":false}}}}"
+    : "],\"borderColor\":\"#3498db\",\"fill\":false,\"pointRadius\":2}]},"
+      "\"options\":{\"plugins\":{\"legend\":{\"display\":false},"
+      "\"title\":{\"display\":true,\"text\":\"Soil moisture (ADC)\"}},"
+      "\"scales\":{\"y\":{\"beginAtZero\":false}}}}";
+
+  String url = "https://quickchart.io/chart?width=640&height=360&format=png&version=3&c=";
+  url += encodeUrlParameter(config);
+  return url;
+}
+
+bool sendThingSpeakCharts() {
+  float temperatures[CHART_RESULTS];
+  int soilValues[CHART_RESULTS];
+  uint8_t count = 0;
+
+  if (!readThingSpeakHistory(temperatures, soilValues, count)) {
+    return false;
+  }
+
+  String temperatureUrl =
+    buildQuickChartUrl(temperatures, soilValues, count, true);
+  String response = bot.sendPhoto(
+    channelId,
+    temperatureUrl,
+    "Температура — последние измерения"
+  );
+  bool temperatureSent = bot.checkForOkResponse(response);
+
+  if (!temperatureSent) {
+    Serial.print("Не удалось отправить график температуры: ");
+    Serial.println(response);
+  }
+
+  String soilUrl =
+    buildQuickChartUrl(temperatures, soilValues, count, false);
+  response = bot.sendPhoto(
+    channelId,
+    soilUrl,
+    "Влажность почвы — последние измерения"
+  );
+  bool soilSent = bot.checkForOkResponse(response);
+
+  if (!soilSent) {
+    Serial.print("Не удалось отправить график влажности: ");
+    Serial.println(response);
+  }
+
+  return temperatureSent && soilSent;
+}
 
 void updateThingSpeak() {
   Serial.println("=== ThingSpeak ===");
@@ -410,6 +612,9 @@ void updateThingSpeak() {
     saveData();
 
     Serial.println("Успех: данные записаны в ThingSpeak.");
+    if (!sendThingSpeakCharts()) {
+      Serial.println("Не удалось отправить все графики в Telegram.");
+    }
   } else {
     Serial.println("Ошибка отправки. Следующая попытка");
     Serial.println("будет при следующем пробуждении.");
